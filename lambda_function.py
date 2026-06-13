@@ -2,11 +2,11 @@ import boto3
 import urllib.parse
 import logging
 
-# Configure logging
+# Logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS clients
+# AWS Clients
 rekognition = boto3.client('rekognition')
 polly = boto3.client('polly')
 s3 = boto3.client('s3')
@@ -17,69 +17,91 @@ OUTPUT_BUCKET = 'audio-output-bucketpooly'
 
 def lambda_handler(event, context):
     try:
-        # Get bucket name and object key
-        bucket = event['Records'][0]['s3']['bucket']['name']
-        image_key = urllib.parse.unquote_plus(
-            event['Records'][0]['s3']['object']['key']
-        )
+        logger.info(f"Incoming event: {event}")
 
-        logger.info(f"Processing image: {image_key} from bucket: {bucket}")
+        records = event.get("Records", [])
 
-        # Detect labels in image
-        response = rekognition.detect_labels(
-            Image={
-                'S3Object': {
-                    'Bucket': bucket,
-                    'Name': image_key
-                }
-            },
-            MaxLabels=5,
-            MinConfidence=70
-        )
+        if not records:
+            return {
+                "statusCode": 400,
+                "body": "No S3 records found in event"
+            }
 
-        labels = [label['Name'] for label in response['Labels']]
+        results = []
 
-        logger.info(f"Detected labels: {labels}")
+        for record in records:
+            bucket = record["s3"]["bucket"]["name"]
+            image_key = urllib.parse.unquote_plus(
+                record["s3"]["object"]["key"]
+            )
 
-        # Create speech text
-        if labels:
-            text = "The image contains " + ", ".join(labels)
-        else:
-            text = "No objects were detected in the image."
+            logger.info(f"Processing file: {image_key} from bucket: {bucket}")
 
-        logger.info(f"Generated text: {text}")
+            # -----------------------------
+            # Rekognition - Detect Labels
+            # -----------------------------
+            response = rekognition.detect_labels(
+                Image={
+                    'S3Object': {
+                        'Bucket': bucket,
+                        'Name': image_key
+                    }
+                },
+                MaxLabels=5,
+                MinConfidence=70
+            )
 
-        # Convert text to speech
-        speech = polly.synthesize_speech(
-            Text=text,
-            OutputFormat='mp3',
-            VoiceId='Joanna'
-        )
+            labels = [label['Name'] for label in response.get('Labels', [])]
+            logger.info(f"Labels detected: {labels}")
 
-        audio_data = speech['AudioStream'].read()
+            # -----------------------------
+            # Build text
+            # -----------------------------
+            if labels:
+                text = "The image contains " + ", ".join(labels)
+            else:
+                text = "No objects were detected in the image."
 
-        # Create output filename
-        audio_file = image_key.rsplit('.', 1)[0] + '.mp3'
+            logger.info(f"Polly text: {text}")
 
-        # Upload MP3 to output bucket
-        s3.put_object(
-            Bucket=OUTPUT_BUCKET,
-            Key=audio_file,
-            Body=audio_data,
-            ContentType='audio/mpeg'
-        )
+            # -----------------------------
+            # Polly - Text to Speech
+            # -----------------------------
+            speech = polly.synthesize_speech(
+                Text=text,
+                OutputFormat='mp3',
+                VoiceId='Joanna'
+            )
 
-        logger.info(f"Audio file uploaded: {audio_file}")
+            # Safe stream handling
+            with speech['AudioStream'] as stream:
+                audio_data = stream.read()
+
+            # -----------------------------
+            # Save MP3 to S3
+            # -----------------------------
+            audio_file = image_key.rsplit('.', 1)[0] + '.mp3'
+
+            s3.put_object(
+                Bucket=OUTPUT_BUCKET,
+                Key=audio_file,
+                Body=audio_data,
+                ContentType='audio/mpeg'
+            )
+
+            logger.info(f"Uploaded MP3: {audio_file}")
+
+            results.append(audio_file)
 
         return {
-            'statusCode': 200,
-            'body': f'Audio file created successfully: {audio_file}'
+            "statusCode": 200,
+            "body": f"Successfully processed files: {results}"
         }
 
     except Exception as e:
-        logger.error(f"Error: {str(e)}")
+        logger.error(f"Lambda error: {str(e)}")
 
         return {
-            'statusCode': 500,
-            'body': f'Error processing image: {str(e)}'
+            "statusCode": 500,
+            "body": f"Error processing image: {str(e)}"
         }
